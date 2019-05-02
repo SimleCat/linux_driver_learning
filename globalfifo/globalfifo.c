@@ -139,6 +139,30 @@ out2:
 }
 
 
+static unsigned int gfifo_poll(struct file *filp, poll_table *wait)
+{
+	unsigned int mask = 0;
+	struct gfifo_dev *dev = filp->private_data;
+
+	mutex_lock(&dev->mutex);
+
+	poll_wait(filp, &dev->r_wait, wait);
+	poll_wait(filp, &dev->w_wait, wait);
+
+	if (dev->cur_len != 0) {
+		mask |= POLLIN | POLLRDNORM;
+	}
+
+	if (dev->cur_len != GLOBALFIFO_SIZE) {
+		mask |= POLLOUT | POLLWRNORM;
+	}
+
+
+	mutex_unlock(&dev->mutex);
+
+	return mask;
+}
+
 static int gfifo_release(struct inode *inode, struct file *filp)
 {
 	return 0;
@@ -151,6 +175,7 @@ static const struct file_operations gfifo_fops = {
 	.read = gfifo_read,
 	.write = gfifo_write,
 	.release = gfifo_release,
+	.poll = gfifo_poll,
 };
 
 
