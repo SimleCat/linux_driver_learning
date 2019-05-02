@@ -1,0 +1,14 @@
+*.o
+*~
+*.depend
+.*.cmd
+*.ko
+*.mod.c
+.tmp_versions
+
+*.bak
+*.swp
+*.tmp
+
+Module.symvers
+modules.order
