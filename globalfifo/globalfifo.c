@@ -6,7 +6,8 @@
 #include <linux/uaccess.h>
 #include <linux/types.h>
 #include <linux/mutex.h>
-
+#include <linux/poll.h>
+#include <linux/sched.h>
 
 #define GLOBALFIFO_SIZE		0x1000
 #define MEM_CLEAR		0x01
@@ -21,6 +22,8 @@ struct gfifo_dev {
 	unsigned int cur_len;
 	u8 mem[GLOBALFIFO_SIZE];
 	struct mutex mutex;
+	wait_queue_head_t r_wait;
+	wait_queue_head_t w_wait;
 };
 
 
@@ -38,13 +41,32 @@ static ssize_t gfifo_read(struct file *filp, char __user *buf, size_t size, loff
 	int ret = 0;
 	struct gfifo_dev *dev = filp->private_data;
 
-	if (dev->cur_len == 0)
-		return 0;
+	DECLARE_WAITQUEUE(wait, current);
+
+	mutex_lock(&dev->mutex);
+	add_wait_queue(&dev->r_wait, &wait);
+
+	while (dev->cur_len == 0) {
+		if (filp->f_flags & O_NONBLOCK) {
+			ret = -EFAULT;
+			goto out;
+		}
+
+		__set_current_state(TASK_INTERRUPTIBLE);
+		mutex_unlock(&dev->mutex);
+
+		schedule();
+		if (signal_pending(current)) {
+			ret = -ERESTARTSYS;
+			goto out2;
+		}
+
+		mutex_lock(&dev->mutex);
+	}
 
 	if (count > dev->cur_len)
 		count = dev->cur_len;
 
-	mutex_lock(&dev->mutex);
 
 	if (copy_to_user(buf, dev->mem, count)) {
 		ret = -EFAULT;
@@ -54,9 +76,14 @@ static ssize_t gfifo_read(struct file *filp, char __user *buf, size_t size, loff
 		ret = count;
 
 		printk(KERN_INFO "read %u bytes, current len: %u\n", count, dev->cur_len);
+		wake_up_interruptible(&dev->w_wait);
 	}
 
+out:
 	mutex_unlock(&dev->mutex);
+out2:
+	remove_wait_queue(&dev->r_wait, &wait);
+	set_current_state(TASK_RUNNING);
 
 	return ret;
 }
@@ -67,14 +94,31 @@ static ssize_t gfifo_write(struct file *filp, const char __user *buf, size_t siz
 	unsigned int count = size;
 	int ret = 0;
 	struct gfifo_dev *dev = filp->private_data;
+	DECLARE_WAITQUEUE(wait, current);
 
-	if (dev->cur_len >= GLOBALFIFO_SIZE)
-		return -EFAULT;
+	mutex_lock(&dev->mutex);
+	add_wait_queue(&dev->w_wait, &wait);
+
+	while (dev->cur_len >= GLOBALFIFO_SIZE) {
+		if (filp->f_flags & O_NONBLOCK) {
+			ret = -EAGAIN;
+			goto out;
+		}
+		__set_current_state(TASK_INTERRUPTIBLE);
+
+		mutex_unlock(&dev->mutex);
+
+		schedule();
+		if (signal_pending(current)) {
+			ret = -ERESTARTSYS;
+			goto out2;
+		}
+		mutex_lock(&dev->mutex);
+	}
 
 	if (count > GLOBALFIFO_SIZE - dev->cur_len)
 		count = GLOBALFIFO_SIZE - dev->cur_len;
 
-	mutex_lock(&dev->mutex);
 
 	if (copy_from_user(dev->mem + dev->cur_len, buf, count)) {
 		ret = -EFAULT;
@@ -83,29 +127,17 @@ static ssize_t gfifo_write(struct file *filp, const char __user *buf, size_t siz
 		ret = count;
 
 		printk(KERN_INFO "written %u bytes, current len: %u\n", count, dev->cur_len);
+		wake_up_interruptible(&dev->r_wait);
 	}
-
+out:
 	mutex_unlock(&dev->mutex);
+out2:
+	remove_wait_queue(&dev->w_wait, &wait);
+	set_current_state(TASK_RUNNING);
 
 	return ret;
 }
 
-static long gfifo_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
-{
-	struct gfifo_dev *dev = filp->private_data;
-
-	switch(cmd) {
-	case MEM_CLEAR:
-		mutex_lock(&dev->mutex);
-		dev->cur_len = 0;
-		mutex_unlock(&dev->mutex);
-		printk(KERN_INFO "globalmem wes set to zero.\n");
-		break;
-	default:
-		return -EINVAL;	
-	}
-	return 0;
-}
 
 static int gfifo_release(struct inode *inode, struct file *filp)
 {
@@ -118,7 +150,6 @@ static const struct file_operations gfifo_fops = {
 	.open = gfifo_open,
 	.read = gfifo_read,
 	.write = gfifo_write,
-	.unlocked_ioctl = gfifo_ioctl,
 	.release = gfifo_release,
 };
 
@@ -155,7 +186,11 @@ static int __init gfifo_init(void)
 		ret = -ENOMEM;
 		goto fail_malloc;
 	}
+
 	mutex_init(&gfifo_devp->mutex);
+	init_waitqueue_head(&gfifo_devp->r_wait);
+	init_waitqueue_head(&gfifo_devp->w_wait);
+
 	gfifo_setup_cdev(gfifo_devp, 0);
 	return 0;
 
