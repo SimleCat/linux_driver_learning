@@ -5,6 +5,7 @@
 #include <linux/slab.h>
 #include <linux/uaccess.h>
 #include <linux/types.h>
+#include <linux/mutex.h>
 
 
 #define GLOBALMEM_SIZE		0x1000
@@ -18,6 +19,7 @@ module_param(gm_major, int, S_IRUGO);
 struct gm_dev {
 	struct cdev cdev;
 	u8 mem[GLOBALMEM_SIZE];
+	struct mutex mutex;
 };
 
 
@@ -41,6 +43,8 @@ static ssize_t gm_read(struct file *filp, char __user *buf, size_t size, loff_t 
 	if (count > GLOBALMEM_SIZE - pos)
 		count = GLOBALMEM_SIZE - pos;
 
+	mutex_lock(&dev->mutex);
+
 	if (copy_to_user(buf, dev->mem+pos, count)) {
 		ret = -EFAULT;
 	} else {
@@ -49,6 +53,8 @@ static ssize_t gm_read(struct file *filp, char __user *buf, size_t size, loff_t 
 
 		printk(KERN_INFO "read %u bytes from %lu\n", count, pos);
 	}
+
+	mutex_unlock(&dev->mutex);
 
 	return ret;
 }
@@ -66,6 +72,8 @@ static ssize_t gm_write(struct file *filp, const char __user *buf, size_t size, 
 	if (count > GLOBALMEM_SIZE - pos)
 		count = GLOBALMEM_SIZE - pos;
 
+	mutex_lock(&dev->mutex);
+
 	if (copy_from_user(dev->mem + pos, buf, count)) {
 		ret = -EFAULT;
 	} else {
@@ -74,6 +82,8 @@ static ssize_t gm_write(struct file *filp, const char __user *buf, size_t size, 
 
 		printk(KERN_INFO "written %u bytes to %lu\n", count, pos);
 	}
+
+	mutex_unlock(&dev->mutex);
 
 	return ret;
 }
@@ -116,7 +126,9 @@ static long gm_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 
 	switch(cmd) {
 	case MEM_CLEAR:
+		mutex_lock(&dev->mutex);
 		memset(dev->mem, 0, GLOBALMEM_SIZE);
+		mutex_unlock(&dev->mutex);
 		printk(KERN_INFO "globalmem wes set to zero.\n");
 		break;
 	default:
@@ -174,7 +186,7 @@ static int __init gm_init(void)
 		ret = -ENOMEM;
 		goto fail_malloc;
 	}
-
+	mutex_init(&gm_devp->mutex);
 	gm_setup_cdev(gm_devp, 0);
 	return 0;
 
